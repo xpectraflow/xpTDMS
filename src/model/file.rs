@@ -181,30 +181,89 @@ impl TdmsFile {
             }
 
             let raw_slice = &self.mmap[raw_start..raw_end];
-            let mut raw_byte_offset = 0usize;
 
-            for obj in &segment.objects {
-                if let Some(ref idx) = obj.raw_data_index {
-                    let size = if let Some(total_bytes) = idx.total_size_bytes {
-                        total_bytes as usize
-                    } else if let Some(elem_size) = idx.data_type.element_size() {
-                        (idx.number_of_values as usize) * elem_size
-                    } else {
-                        0
-                    };
+            if segment.header.is_interleaved {
+                let mut frame_size = 0usize;
+                let mut target_offset_in_frame = 0usize;
+                let mut target_elem_size = 0usize;
+                let mut found = false;
 
-                    let (g_opt, c_opt) = parse_object_path(&obj.path);
-                    if let (Some(ref g), Some(ref c)) = (g_opt, c_opt) {
-                        if g == group_name && c == channel_name {
-                            let count = idx.number_of_values as usize;
-                            if raw_byte_offset + size <= raw_slice.len() {
-                                let obj_slice = &raw_slice[raw_byte_offset..raw_byte_offset + size];
-                                let chunk_data = T::read_slice(obj_slice, segment.header.is_big_endian, count)?;
-                                data.extend(chunk_data);
+                for obj in &segment.objects {
+                    if let Some(ref idx) = obj.raw_data_index {
+                        let elem_size = idx.data_type.element_size().unwrap_or(0);
+                        let (g_opt, c_opt) = parse_object_path(&obj.path);
+                        if let (Some(ref g), Some(ref c)) = (g_opt, c_opt) {
+                            if g == group_name && c == channel_name {
+                                target_offset_in_frame = frame_size;
+                                target_elem_size = elem_size;
+                                found = true;
                             }
                         }
+                        frame_size += elem_size;
                     }
-                    raw_byte_offset += size;
+                }
+
+                if found && frame_size > 0 && target_elem_size > 0 {
+                    let total_frames = raw_slice.len() / frame_size;
+                    for f in 0..total_frames {
+                        let sample_start = f * frame_size + target_offset_in_frame;
+                        if sample_start + target_elem_size <= raw_slice.len() {
+                            let sample_slice = &raw_slice[sample_start..sample_start + target_elem_size];
+                            let val = T::read_slice(sample_slice, segment.header.is_big_endian, 1)?;
+                            data.extend(val);
+                        }
+                    }
+                }
+            } else {
+                let mut single_chunk_size = 0usize;
+                for obj in &segment.objects {
+                    if let Some(ref idx) = obj.raw_data_index {
+                        let size = if let Some(total_bytes) = idx.total_size_bytes {
+                            total_bytes as usize
+                        } else if let Some(elem_size) = idx.data_type.element_size() {
+                            (idx.number_of_values as usize) * elem_size
+                        } else {
+                            0
+                        };
+                        single_chunk_size += size;
+                    }
+                }
+
+                let num_chunks = if single_chunk_size > 0 {
+                    (raw_slice.len() / single_chunk_size).max(1)
+                } else {
+                    1
+                };
+
+                for c in 0..num_chunks {
+                    let chunk_start = c * single_chunk_size;
+                    let mut raw_byte_offset = 0usize;
+
+                    for obj in &segment.objects {
+                        if let Some(ref idx) = obj.raw_data_index {
+                            let size = if let Some(total_bytes) = idx.total_size_bytes {
+                                total_bytes as usize
+                            } else if let Some(elem_size) = idx.data_type.element_size() {
+                                (idx.number_of_values as usize) * elem_size
+                            } else {
+                                0
+                            };
+
+                            let (g_opt, c_opt) = parse_object_path(&obj.path);
+                            if let (Some(ref g), Some(ref c_name)) = (g_opt, c_opt) {
+                                if g == group_name && c_name == channel_name {
+                                    let count = idx.number_of_values as usize;
+                                    let start_pos = chunk_start + raw_byte_offset;
+                                    if start_pos + size <= raw_slice.len() {
+                                        let obj_slice = &raw_slice[start_pos..start_pos + size];
+                                        let chunk_data = T::read_slice(obj_slice, segment.header.is_big_endian, count)?;
+                                        data.extend(chunk_data);
+                                    }
+                                }
+                            }
+                            raw_byte_offset += size;
+                        }
+                    }
                 }
             }
         }

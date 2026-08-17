@@ -251,3 +251,68 @@ fn test_raw_data_index_inheritance() {
     let expected: Vec<f64> = (0..100).map(|i| i as f64).collect();
     assert_eq!(data, expected);
 }
+
+#[test]
+fn test_interleaved_raw_data() {
+    let mut buffer = Vec::new();
+
+    // Lead-in Header: ToC flags = 0x2E (metadata + raw data + interleaved bit 0x20)
+    buffer.extend_from_slice(b"TDSm");
+    buffer.extend_from_slice(&(0x2eu32).to_le_bytes());
+    buffer.extend_from_slice(&(4713u32).to_le_bytes());
+    let h_offset_pos = buffer.len();
+    buffer.extend_from_slice(&(0u64).to_le_bytes());
+    buffer.extend_from_slice(&(0u64).to_le_bytes());
+
+    let m_start = buffer.len();
+    buffer.extend_from_slice(&(3u32).to_le_bytes()); // Root, Chan1, Chan2
+
+    let root = "/";
+    buffer.extend_from_slice(&(root.len() as u32).to_le_bytes());
+    buffer.extend_from_slice(root.as_bytes());
+    buffer.extend_from_slice(&(0xFFFF_FFFFu32).to_le_bytes());
+    buffer.extend_from_slice(&(0u32).to_le_bytes());
+
+    let c1_path = "/'G'/'C1'";
+    buffer.extend_from_slice(&(c1_path.len() as u32).to_le_bytes());
+    buffer.extend_from_slice(c1_path.as_bytes());
+    buffer.extend_from_slice(&(16u32).to_le_bytes());
+    buffer.extend_from_slice(&(DataType::DoubleFloat as u32).to_le_bytes());
+    buffer.extend_from_slice(&(1u32).to_le_bytes());
+    buffer.extend_from_slice(&(3u64).to_le_bytes());
+    buffer.extend_from_slice(&(0u32).to_le_bytes());
+
+    let c2_path = "/'G'/'C2'";
+    buffer.extend_from_slice(&(c2_path.len() as u32).to_le_bytes());
+    buffer.extend_from_slice(c2_path.as_bytes());
+    buffer.extend_from_slice(&(16u32).to_le_bytes());
+    buffer.extend_from_slice(&(DataType::DoubleFloat as u32).to_le_bytes());
+    buffer.extend_from_slice(&(1u32).to_le_bytes());
+    buffer.extend_from_slice(&(3u64).to_le_bytes());
+    buffer.extend_from_slice(&(0u32).to_le_bytes());
+
+    let r_start = buffer.len();
+    let r_offset = (r_start - m_start) as u64;
+
+    // Interleaved data: [C1_s1, C2_s1, C1_s2, C2_s2, C1_s3, C2_s3]
+    let interleaved_raw: Vec<f64> = vec![1.0, 10.0, 2.0, 20.0, 3.0, 30.0];
+    for &v in &interleaved_raw {
+        buffer.extend_from_slice(&v.to_le_bytes());
+    }
+
+    let tot_len = buffer.len();
+    let next_off = (tot_len - 28) as u64;
+    buffer[h_offset_pos..h_offset_pos + 8].copy_from_slice(&next_off.to_le_bytes());
+    buffer[h_offset_pos + 8..h_offset_pos + 16].copy_from_slice(&r_offset.to_le_bytes());
+
+    let mut mmap_mut = MmapMut::map_anon(buffer.len()).unwrap();
+    mmap_mut.copy_from_slice(&buffer);
+    let mmap = mmap_mut.make_read_only().unwrap();
+
+    let tdms = TdmsFile::from_mmap(mmap).expect("Should parse interleaved TDMS segment");
+    let c1_data = tdms.read_channel_data::<f64>("G", "C1").unwrap();
+    let c2_data = tdms.read_channel_data::<f64>("G", "C2").unwrap();
+
+    assert_eq!(c1_data, vec![1.0, 2.0, 3.0]);
+    assert_eq!(c2_data, vec![10.0, 20.0, 30.0]);
+}

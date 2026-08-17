@@ -29,7 +29,7 @@ impl SegmentHeader {
         let toc_flags = LittleEndian::read_u32(&bytes[4..8]);
         let version = LittleEndian::read_u32(&bytes[8..12]);
 
-        let is_big_endian = (toc_flags & (1 << 7)) != 0;
+        let is_big_endian = (toc_flags & (1 << 6)) != 0;
 
         let (next_segment_offset, raw_data_offset) = if is_big_endian {
             (
@@ -49,11 +49,11 @@ impl SegmentHeader {
             next_segment_offset,
             raw_data_offset,
             has_metadata: (toc_flags & (1 << 1)) != 0,
+            is_new_object_list: (toc_flags & (1 << 2)) != 0,
             has_raw_data: (toc_flags & (1 << 3)) != 0,
-            has_daqmx: (toc_flags & (1 << 5)) != 0,
-            is_interleaved: (toc_flags & (1 << 6)) != 0,
+            is_interleaved: (toc_flags & (1 << 5)) != 0,
             is_big_endian,
-            is_new_object_list: (toc_flags & (1 << 8)) != 0,
+            has_daqmx: (toc_flags & (1 << 7)) != 0,
         })
     }
 }
