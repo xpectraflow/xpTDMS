@@ -71,6 +71,7 @@ impl DataType {
 
 /// National Instruments 128-bit timestamp (64-bit seconds since 1904-01-01 + 64-bit fractional seconds)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(C)]
 pub struct TdmsTimestamp {
     pub fraction: u64,
     pub seconds: i64,

@@ -34,6 +34,7 @@ impl SegmentIndex {
         header: &SegmentHeader,
         header_offset: u64,
         total_file_size: u64,
+        prev_index_map: &mut HashMap<String, ObjectRawDataIndex>,
     ) -> Result<Self> {
         let metadata_offset = header_offset + HEADER_SIZE as u64;
         let raw_data_offset = metadata_offset + header.raw_data_offset;
@@ -54,22 +55,30 @@ impl SegmentIndex {
 
                 let raw_data_index = match raw_data_header {
                     0xFFFF_FFFF => None, // No raw data for this object in this segment
-                    0x0000_0000 => None, // Matches previous segment raw data index layout
+                    0x0000_0000 => prev_index_map.get(&path).cloned(), // Reuses previous segment raw data index layout
                     _ => {
                         let dtype = reader.read_data_type()?;
                         let dimension = reader.read_u32()?;
                         let number_of_values = reader.read_u64()?;
+                        let mut bytes_read = 16;
                         let total_size_bytes = if dtype == DataType::String {
+                            bytes_read += 8;
                             Some(reader.read_u64()?)
                         } else {
                             None
                         };
-                        Some(ObjectRawDataIndex {
+                        let descriptor_len = raw_data_header as usize;
+                        if descriptor_len > bytes_read {
+                            reader.read_bytes(descriptor_len - bytes_read)?;
+                        }
+                        let idx = ObjectRawDataIndex {
                             data_type: dtype,
                             dimension,
                             number_of_values,
                             total_size_bytes,
-                        })
+                        };
+                        prev_index_map.insert(path.clone(), idx.clone());
+                        Some(idx)
                     }
                 };
 

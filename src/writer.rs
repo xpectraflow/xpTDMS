@@ -54,7 +54,7 @@ impl TdmsWriter {
         let chan_path = format!("/'{}'/'{}'", group_name, channel_name);
         buffer.extend_from_slice(&(chan_path.len() as u32).to_le_bytes());
         buffer.extend_from_slice(chan_path.as_bytes());
-        buffer.extend_from_slice(&(20u32).to_le_bytes());
+        buffer.extend_from_slice(&(16u32).to_le_bytes());
         buffer.extend_from_slice(&(T::data_type() as u32).to_le_bytes());
         buffer.extend_from_slice(&(1u32).to_le_bytes());
         buffer.extend_from_slice(&(data.len() as u64).to_le_bytes());

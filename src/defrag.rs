@@ -1,8 +1,46 @@
+use crate::binary::{DataType, TdmsTimestamp};
 use crate::error::Result;
 use crate::model::file::TdmsFile;
+use crate::model::property::PropertyValue;
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
+
+fn write_property_value(buffer: &mut Vec<u8>, val: &PropertyValue) {
+    buffer.extend_from_slice(&(val.data_type() as u32).to_le_bytes());
+    match val {
+        PropertyValue::Void => {}
+        PropertyValue::I8(v) => buffer.push(*v as u8),
+        PropertyValue::I16(v) => buffer.extend_from_slice(&v.to_le_bytes()),
+        PropertyValue::I32(v) => buffer.extend_from_slice(&v.to_le_bytes()),
+        PropertyValue::I64(v) => buffer.extend_from_slice(&v.to_le_bytes()),
+        PropertyValue::U8(v) => buffer.push(*v),
+        PropertyValue::U16(v) => buffer.extend_from_slice(&v.to_le_bytes()),
+        PropertyValue::U32(v) => buffer.extend_from_slice(&v.to_le_bytes()),
+        PropertyValue::U64(v) => buffer.extend_from_slice(&v.to_le_bytes()),
+        PropertyValue::SingleFloat(v) => buffer.extend_from_slice(&v.to_le_bytes()),
+        PropertyValue::DoubleFloat(v) => buffer.extend_from_slice(&v.to_le_bytes()),
+        PropertyValue::String(s) => {
+            buffer.extend_from_slice(&(s.len() as u32).to_le_bytes());
+            buffer.extend_from_slice(s.as_bytes());
+        }
+        PropertyValue::Boolean(b) => buffer.push(if *b { 1 } else { 0 }),
+        PropertyValue::Timestamp(ts) => {
+            buffer.extend_from_slice(&ts.fraction.to_le_bytes());
+            buffer.extend_from_slice(&ts.seconds.to_le_bytes());
+        }
+    }
+}
+
+fn write_properties(buffer: &mut Vec<u8>, props: &HashMap<String, PropertyValue>) {
+    buffer.extend_from_slice(&(props.len() as u32).to_le_bytes());
+    for (name, val) in props {
+        buffer.extend_from_slice(&(name.len() as u32).to_le_bytes());
+        buffer.extend_from_slice(name.as_bytes());
+        write_property_value(buffer, val);
+    }
+}
 
 pub struct Defragmenter;
 
@@ -38,38 +76,21 @@ impl Defragmenter {
         buffer.extend_from_slice(&(1u32).to_le_bytes());
         buffer.extend_from_slice(b"/");
         buffer.extend_from_slice(&(0xFFFF_FFFFu32).to_le_bytes()); // No raw data
-        buffer.extend_from_slice(&(tdms_file.properties.len() as u32).to_le_bytes());
-        for (name, val) in &tdms_file.properties {
-            buffer.extend_from_slice(&(name.len() as u32).to_le_bytes());
-            buffer.extend_from_slice(name.as_bytes());
-            buffer.extend_from_slice(&(val.data_type() as u32).to_le_bytes());
-            // Write property value bytes
-            match val {
-                crate::model::property::PropertyValue::String(s) => {
-                    buffer.extend_from_slice(&(s.len() as u32).to_le_bytes());
-                    buffer.extend_from_slice(s.as_bytes());
-                }
-                crate::model::property::PropertyValue::I32(v) => buffer.extend_from_slice(&v.to_le_bytes()),
-                crate::model::property::PropertyValue::I64(v) => buffer.extend_from_slice(&v.to_le_bytes()),
-                crate::model::property::PropertyValue::DoubleFloat(v) => buffer.extend_from_slice(&v.to_le_bytes()),
-                crate::model::property::PropertyValue::Boolean(b) => buffer.push(if *b { 1 } else { 0 }),
-                _ => {}
-            }
-        }
+        write_properties(&mut buffer, &tdms_file.properties);
 
         // Object Groups & Channels
         for group in tdms_file.groups.values() {
             buffer.extend_from_slice(&(group.path.len() as u32).to_le_bytes());
             buffer.extend_from_slice(group.path.as_bytes());
             buffer.extend_from_slice(&(0xFFFF_FFFFu32).to_le_bytes());
-            buffer.extend_from_slice(&(group.properties.len() as u32).to_le_bytes());
+            write_properties(&mut buffer, &group.properties);
 
             for channel in group.channels.values() {
                 buffer.extend_from_slice(&(channel.path.len() as u32).to_le_bytes());
                 buffer.extend_from_slice(channel.path.as_bytes());
 
                 if let Some(dtype) = channel.data_type {
-                    buffer.extend_from_slice(&(20u32).to_le_bytes());
+                    buffer.extend_from_slice(&(16u32).to_le_bytes());
                     buffer.extend_from_slice(&(dtype as u32).to_le_bytes());
                     buffer.extend_from_slice(&(1u32).to_le_bytes());
                     buffer.extend_from_slice(&(channel.number_of_values as u64).to_le_bytes());
@@ -77,7 +98,7 @@ impl Defragmenter {
                     buffer.extend_from_slice(&(0xFFFF_FFFFu32).to_le_bytes());
                 }
 
-                buffer.extend_from_slice(&(channel.properties.len() as u32).to_le_bytes());
+                write_properties(&mut buffer, &channel.properties);
             }
         }
 
@@ -89,31 +110,66 @@ impl Defragmenter {
             for channel in group.channels.values() {
                 if let Some(dtype) = channel.data_type {
                     match dtype {
-                        crate::binary::DataType::DoubleFloat => {
+                        DataType::DoubleFloat => {
                             if let Ok(data) = tdms_file.read_channel_data::<f64>(&group.name, &channel.name) {
-                                for v in data {
-                                    buffer.extend_from_slice(&v.to_le_bytes());
-                                }
+                                for v in data { buffer.extend_from_slice(&v.to_le_bytes()); }
                             }
                         }
-                        crate::binary::DataType::SingleFloat => {
+                        DataType::SingleFloat => {
                             if let Ok(data) = tdms_file.read_channel_data::<f32>(&group.name, &channel.name) {
-                                for v in data {
-                                    buffer.extend_from_slice(&v.to_le_bytes());
-                                }
+                                for v in data { buffer.extend_from_slice(&v.to_le_bytes()); }
                             }
                         }
-                        crate::binary::DataType::I32 => {
+                        DataType::I8 => {
+                            if let Ok(data) = tdms_file.read_channel_data::<i8>(&group.name, &channel.name) {
+                                for v in data { buffer.push(v as u8); }
+                            }
+                        }
+                        DataType::I16 => {
+                            if let Ok(data) = tdms_file.read_channel_data::<i16>(&group.name, &channel.name) {
+                                for v in data { buffer.extend_from_slice(&v.to_le_bytes()); }
+                            }
+                        }
+                        DataType::I32 => {
                             if let Ok(data) = tdms_file.read_channel_data::<i32>(&group.name, &channel.name) {
-                                for v in data {
-                                    buffer.extend_from_slice(&v.to_le_bytes());
-                                }
+                                for v in data { buffer.extend_from_slice(&v.to_le_bytes()); }
                             }
                         }
-                        crate::binary::DataType::I64 => {
+                        DataType::I64 => {
                             if let Ok(data) = tdms_file.read_channel_data::<i64>(&group.name, &channel.name) {
+                                for v in data { buffer.extend_from_slice(&v.to_le_bytes()); }
+                            }
+                        }
+                        DataType::U8 => {
+                            if let Ok(data) = tdms_file.read_channel_data::<u8>(&group.name, &channel.name) {
+                                for v in data { buffer.push(v); }
+                            }
+                        }
+                        DataType::U16 => {
+                            if let Ok(data) = tdms_file.read_channel_data::<u16>(&group.name, &channel.name) {
+                                for v in data { buffer.extend_from_slice(&v.to_le_bytes()); }
+                            }
+                        }
+                        DataType::U32 => {
+                            if let Ok(data) = tdms_file.read_channel_data::<u32>(&group.name, &channel.name) {
+                                for v in data { buffer.extend_from_slice(&v.to_le_bytes()); }
+                            }
+                        }
+                        DataType::U64 => {
+                            if let Ok(data) = tdms_file.read_channel_data::<u64>(&group.name, &channel.name) {
+                                for v in data { buffer.extend_from_slice(&v.to_le_bytes()); }
+                            }
+                        }
+                        DataType::Boolean => {
+                            if let Ok(data) = tdms_file.read_channel_data::<bool>(&group.name, &channel.name) {
+                                for v in data { buffer.push(if v { 1 } else { 0 }); }
+                            }
+                        }
+                        DataType::Timestamp => {
+                            if let Ok(data) = tdms_file.read_channel_data::<TdmsTimestamp>(&group.name, &channel.name) {
                                 for v in data {
-                                    buffer.extend_from_slice(&v.to_le_bytes());
+                                    buffer.extend_from_slice(&v.fraction.to_le_bytes());
+                                    buffer.extend_from_slice(&v.seconds.to_le_bytes());
                                 }
                             }
                         }

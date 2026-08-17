@@ -18,6 +18,26 @@ pub struct TdmsFile {
     mmap: Mmap,
 }
 
+pub fn parse_object_path(path: &str) -> (Option<String>, Option<String>) {
+    let clean = path.trim();
+    if clean == "/" || clean == "'/'" || clean.is_empty() {
+        return (None, None);
+    }
+    let parts: Vec<String> = clean
+        .split('/')
+        .map(|s| s.trim_matches('\'').trim_matches('"').trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if parts.len() == 1 {
+        (Some(parts[0].clone()), None)
+    } else if parts.len() >= 2 {
+        (Some(parts[0].clone()), Some(parts[1].clone()))
+    } else {
+        (None, None)
+    }
+}
+
 impl TdmsFile {
     /// Open and memory-map a TDMS file from disk, indexing all segments in zero-copy mode.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
@@ -34,6 +54,7 @@ impl TdmsFile {
 
         let mut root_properties = HashMap::new();
         let mut groups: HashMap<String, TdmsGroup> = HashMap::new();
+        let mut prev_index_map = HashMap::new();
 
         while offset + HEADER_SIZE as u64 <= total_size {
             let mut header_bytes = [0u8; HEADER_SIZE];
@@ -63,33 +84,30 @@ impl TdmsFile {
             let metadata_slice = &mmap[metadata_slice_start..metadata_slice_end];
             let mut reader = SliceReader::new(metadata_slice, header.is_big_endian);
 
-            let segment_index = SegmentIndex::parse_metadata(&mut reader, &header, offset, total_size)?;
+            let segment_index = SegmentIndex::parse_metadata(&mut reader, &header, offset, total_size, &mut prev_index_map)?;
 
             // Update Object Hierarchy & Properties
             for obj in &segment_index.objects {
-                let clean_path = obj.path.trim_matches('\'');
-                if clean_path == "/" || clean_path == "'/'" || obj.path == "/" || obj.path == "'/'" {
-                    root_properties.extend(obj.properties.clone());
-                } else {
-                    let parts: Vec<&str> = clean_path.split('/').filter(|s| !s.is_empty()).collect();
-                    if parts.len() == 1 {
-                        let group_name = parts[0].trim_matches('\'').trim_matches('"');
+                let (group_opt, chan_opt) = parse_object_path(&obj.path);
+                match (group_opt, chan_opt) {
+                    (None, None) => {
+                        root_properties.extend(obj.properties.clone());
+                    }
+                    (Some(group_name), None) => {
                         let group = groups
-                            .entry(group_name.to_string())
-                            .or_insert_with(|| TdmsGroup::new(group_name.to_string(), obj.path.clone()));
+                            .entry(group_name.clone())
+                            .or_insert_with(|| TdmsGroup::new(group_name, obj.path.clone()));
                         group.properties.extend(obj.properties.clone());
-                    } else if parts.len() >= 2 {
-                        let group_name = parts[0].trim_matches('\'').trim_matches('"');
-                        let channel_name = parts[1].trim_matches('\'').trim_matches('"');
-
+                    }
+                    (Some(group_name), Some(channel_name)) => {
                         let group = groups
-                            .entry(group_name.to_string())
-                            .or_insert_with(|| TdmsGroup::new(group_name.to_string(), format!("/'\"{}\"'", group_name)));
+                            .entry(group_name.clone())
+                            .or_insert_with(|| TdmsGroup::new(group_name.clone(), format!("/'{}'", group_name)));
 
                         let channel = group
                             .channels
-                            .entry(channel_name.to_string())
-                            .or_insert_with(|| TdmsChannel::new(obj.path.clone(), group_name.to_string(), channel_name.to_string()));
+                            .entry(channel_name.clone())
+                            .or_insert_with(|| TdmsChannel::new(obj.path.clone(), group_name.clone(), channel_name));
 
                         channel.properties.extend(obj.properties.clone());
 
@@ -98,6 +116,7 @@ impl TdmsFile {
                             channel.number_of_values += raw_idx.number_of_values;
                         }
                     }
+                    _ => {}
                 }
             }
 
@@ -162,16 +181,30 @@ impl TdmsFile {
             }
 
             let raw_slice = &self.mmap[raw_start..raw_end];
+            let mut raw_byte_offset = 0usize;
 
             for obj in &segment.objects {
-                let clean_obj = obj.path.trim_matches('\'').replace("'", "").replace("\"", "");
-                let clean_target = format!("/{}", group_name) + &format!("/{}", channel_name);
-                if clean_obj == clean_target || obj.path.contains(group_name) && obj.path.contains(channel_name) {
-                    if let Some(ref idx) = obj.raw_data_index {
-                        let count = idx.number_of_values as usize;
-                        let chunk_data = T::read_slice(raw_slice, segment.header.is_big_endian, count)?;
-                        data.extend(chunk_data);
+                if let Some(ref idx) = obj.raw_data_index {
+                    let size = if let Some(total_bytes) = idx.total_size_bytes {
+                        total_bytes as usize
+                    } else if let Some(elem_size) = idx.data_type.element_size() {
+                        (idx.number_of_values as usize) * elem_size
+                    } else {
+                        0
+                    };
+
+                    let (g_opt, c_opt) = parse_object_path(&obj.path);
+                    if let (Some(ref g), Some(ref c)) = (g_opt, c_opt) {
+                        if g == group_name && c == channel_name {
+                            let count = idx.number_of_values as usize;
+                            if raw_byte_offset + size <= raw_slice.len() {
+                                let obj_slice = &raw_slice[raw_byte_offset..raw_byte_offset + size];
+                                let chunk_data = T::read_slice(obj_slice, segment.header.is_big_endian, count)?;
+                                data.extend(chunk_data);
+                            }
+                        }
                     }
+                    raw_byte_offset += size;
                 }
             }
         }
